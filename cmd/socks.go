@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -134,11 +135,13 @@ var socksCmd = &cobra.Command{
 			return
 		}
 
-		// 创建账户池
-		accountPool := api.NewAccountPool(2, api.RegisterNewAccount)
-
 		// 创建自定义的 Dial 函数，为每个连接使用单独的账户
 		var connectionCount int64
+
+		// 创建账户池，确保至少有连接数+1个账户
+		accountPool := api.NewAccountPool(1, api.RegisterNewAccount, func() int {
+			return int(atomic.LoadInt64(&connectionCount))
+		})
 
 		// 创建 SOCKS5 服务器
 		var resolver socks5.NameResolver
@@ -160,12 +163,12 @@ var socksCmd = &cobra.Command{
 					// 从账户池获取账户
 					account, err := accountPool.GetAccount()
 					if err != nil {
+						atomic.AddInt64(&connectionCount, -1)
 						return nil, fmt.Errorf("failed to get account from pool: %v", err)
 					}
-					defer accountPool.ReleaseAccount(account)
 
 					// 使用账户配置创建隧道
-					return createTunnelConnection(
+					conn, cleanup, err := createTunnelConnection(
 						account.Config,
 						addr,
 						sni,
@@ -180,6 +183,22 @@ var socksCmd = &cobra.Command{
 						reconnectDelay,
 						network,
 					)
+					if err != nil {
+						atomic.AddInt64(&connectionCount, -1)
+						accountPool.ReleaseAccount(account)
+						return nil, err
+					}
+
+					// 包装连接以在关闭时释放账户和减少计数
+					wrappedConn := &accountTrackingConn{
+						Conn:        conn,
+						account:     account,
+						accountPool: accountPool,
+						count:       &connectionCount,
+						cleanup:     cleanup,
+					}
+
+					return wrappedConn, nil
 				}),
 				socks5.WithResolver(resolver),
 			)
@@ -193,12 +212,12 @@ var socksCmd = &cobra.Command{
 					// 从账户池获取账户
 					account, err := accountPool.GetAccount()
 					if err != nil {
+						atomic.AddInt64(&connectionCount, -1)
 						return nil, fmt.Errorf("failed to get account from pool: %v", err)
 					}
-					defer accountPool.ReleaseAccount(account)
 
 					// 使用账户配置创建隧道
-					return createTunnelConnection(
+					conn, cleanup, err := createTunnelConnection(
 						account.Config,
 						addr,
 						sni,
@@ -213,6 +232,22 @@ var socksCmd = &cobra.Command{
 						reconnectDelay,
 						network,
 					)
+					if err != nil {
+						atomic.AddInt64(&connectionCount, -1)
+						accountPool.ReleaseAccount(account)
+						return nil, err
+					}
+
+					// 包装连接以在关闭时释放账户和减少计数
+					wrappedConn := &accountTrackingConn{
+						Conn:        conn,
+						account:     account,
+						accountPool: accountPool,
+						count:       &connectionCount,
+						cleanup:     cleanup,
+					}
+
+					return wrappedConn, nil
 				}),
 				socks5.WithResolver(resolver),
 				socks5.WithAuthMethods(
@@ -236,6 +271,43 @@ var socksCmd = &cobra.Command{
 	},
 }
 
+// accountTrackingConn 包装连接以在关闭时释放账户和减少计数
+type accountTrackingConn struct {
+	net.Conn
+	account     *api.Account
+	accountPool *api.AccountPool
+	count       *int64
+	cleanup     func()
+	once        sync.Once
+}
+
+// Close 关闭连接并释放账户
+func (atc *accountTrackingConn) Close() error {
+	var err error
+	atc.once.Do(func() {
+		// 确保连接关闭
+		if atc.Conn != nil {
+			err = atc.Conn.Close()
+		}
+
+		// 执行清理函数（关闭TUN设备，取消维护goroutine）
+		if atc.cleanup != nil {
+			atc.cleanup()
+		}
+
+		// 释放账户
+		if atc.accountPool != nil && atc.account != nil {
+			atc.accountPool.ReleaseAccount(atc.account)
+		}
+
+		// 减少连接计数
+		if atc.count != nil {
+			atomic.AddInt64(atc.count, -1)
+		}
+	})
+	return err
+}
+
 // createTunnelConnection 为指定地址创建隧道连接
 func createTunnelConnection(
 	cfg *config.Config,
@@ -251,28 +323,28 @@ func createTunnelConnection(
 	initialPacketSize uint16,
 	reconnectDelay time.Duration,
 	network string,
-) (net.Conn, error) {
+) (net.Conn, func(), error) {
 	// 获取私钥和公钥
 	privKey, err := cfg.GetEcPrivateKey()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get private key: %v", err)
+		return nil, nil, fmt.Errorf("failed to get private key: %v", err)
 	}
 
 	peerPubKey, err := cfg.GetEcEndpointPublicKey()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get public key: %v", err)
+		return nil, nil, fmt.Errorf("failed to get public key: %v", err)
 	}
 
 	// 生成证书
 	cert, err := internal.GenerateCert(privKey, &privKey.PublicKey)
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate cert: %v", err)
+		return nil, nil, fmt.Errorf("failed to generate cert: %v", err)
 	}
 
 	// 准备 TLS 配置
 	tlsConfig, err := api.PrepareTlsConfig(privKey, peerPubKey, cert, sni)
 	if err != nil {
-		return nil, fmt.Errorf("failed to prepare TLS config: %v", err)
+		return nil, nil, fmt.Errorf("failed to prepare TLS config: %v", err)
 	}
 
 	// 确定端点地址
@@ -294,14 +366,14 @@ func createTunnelConnection(
 	if !tunnelIPv4 {
 		v4, err := netip.ParseAddr(cfg.IPv4)
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse IPv4 address: %v", err)
+			return nil, nil, fmt.Errorf("failed to parse IPv4 address: %v", err)
 		}
 		localAddresses = append(localAddresses, v4)
 	}
 	if !tunnelIPv6 {
 		v6, err := netip.ParseAddr(cfg.IPv6)
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse IPv6 address: %v", err)
+			return nil, nil, fmt.Errorf("failed to parse IPv6 address: %v", err)
 		}
 		localAddresses = append(localAddresses, v6)
 	}
@@ -309,20 +381,29 @@ func createTunnelConnection(
 	// 创建虚拟 TUN 设备
 	tunDev, tunNet, err := netstack.CreateNetTUN(localAddresses, dnsAddrs, mtu)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create virtual TUN device: %v", err)
+		return nil, nil, fmt.Errorf("failed to create virtual TUN device: %v", err)
 	}
-	defer tunDev.Close()
 
 	// 启动隧道维护 goroutine
-	go api.MaintainTunnel(context.Background(), tlsConfig, keepalivePeriod, initialPacketSize, endpoint, api.NewNetstackAdapter(tunDev), mtu, reconnectDelay)
+	ctx, cancel := context.WithCancel(context.Background())
+	go api.MaintainTunnel(ctx, tlsConfig, keepalivePeriod, initialPacketSize, endpoint, api.NewNetstackAdapter(tunDev), mtu, reconnectDelay)
 
 	// 连接到目标地址
 	conn, err := tunNet.DialContext(context.Background(), network, addr)
 	if err != nil {
-		return nil, fmt.Errorf("failed to dial %s: %v", addr, err)
+		cancel() // 取消维护goroutine
+		tunDev.Close()
+		return nil, nil, fmt.Errorf("failed to dial %s: %v", addr, err)
 	}
 
-	return conn, nil
+	// 返回清理函数
+	cleanup := func() {
+		cancel() // 取消维护goroutine
+		conn.Close()
+		tunDev.Close()
+	}
+
+	return conn, cleanup, nil
 }
 
 func init() {

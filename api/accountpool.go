@@ -26,6 +26,7 @@ type Account struct {
 	InUse     bool
 	LastUsed  time.Time
 	tlsConfig *TlsConfigWrapper
+	Conn      net.Conn
 }
 
 // TlsConfigWrapper 包装TLS配置和相关参数
@@ -39,7 +40,7 @@ type TlsConfigWrapper struct {
 }
 
 // NewAccountPool 创建一个新的账户池
-func NewAccountPool(minExtra int, registerFunc func() (*config.Config, error)) *AccountPool {
+func NewAccountPool(minExtra int, registerFunc func() (*config.Config, error), activeConnections func() int) *AccountPool {
 	pool := &AccountPool{
 		accounts:     make([]*Account, 0),
 		minExtra:     minExtra,
@@ -47,7 +48,7 @@ func NewAccountPool(minExtra int, registerFunc func() (*config.Config, error)) *
 	}
 
 	// 启动后台 goroutine 来维护账户池
-	go pool.maintainPool()
+	pool.MaintainPool(activeConnections)
 
 	return pool
 }
@@ -91,32 +92,30 @@ func (ap *AccountPool) ReleaseAccount(account *Account) {
 	account.InUse = false
 }
 
-// maintainPool 维护账户池，确保有足够的账户
-func (ap *AccountPool) maintainPool() {
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
+// MaintainPool 维护账户池，确保有足够的账户
+func (ap *AccountPool) MaintainPool(activeConnections func() int) {
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
 
-	for range ticker.C {
-		ap.checkAndRefill()
-	}
+		for range ticker.C {
+			ap.checkAndRefill(activeConnections)
+		}
+	}()
 }
 
 // checkAndRefill 检查并补充账户池
-func (ap *AccountPool) checkAndRefill() {
+func (ap *AccountPool) checkAndRefill(activeConnections func() int) {
 	ap.mu.Lock()
 	defer ap.mu.Unlock()
 
-	// 计算当前正在使用的账户数
-	inUseCount := 0
-	for _, account := range ap.accounts {
-		if account.InUse {
-			inUseCount++
-		}
-	}
+	// 获取当前活跃连接数
+	activeConns := activeConnections()
 
-	// 计算需要补充的账户数
-	neededAccounts := inUseCount + ap.minExtra - len(ap.accounts)
+	// 计算需要补充的账户数，确保至少有 activeConnections + minExtra 个账户
+	neededAccounts := activeConns + ap.minExtra - len(ap.accounts)
 
+	// 如果需要的账户数大于0，则注册新账户
 	for i := 0; i < neededAccounts; i++ {
 		log.Printf("Adding new account to pool...")
 		newConfig, err := ap.registerFunc()
@@ -134,6 +133,9 @@ func (ap *AccountPool) checkAndRefill() {
 		ap.accounts = append(ap.accounts, account)
 		log.Printf("Added new account to pool. Total accounts: %d", len(ap.accounts))
 	}
+
+	// 如果账户过多，可以考虑清理一些最老的未使用账户
+	// 但为了简单起见，我们不实现这个功能
 }
 
 // GetAccountCount 返回池中账户总数和正在使用的账户数
@@ -149,6 +151,11 @@ func (ap *AccountPool) GetAccountCount() (total, inUse int) {
 	}
 
 	return total, inUse
+}
+
+// GetActiveConnections 返回当前活跃连接数
+func (ap *AccountPool) GetActiveConnections() int {
+	return 0
 }
 
 // RegisterNewAccount 注册新账户的实现
