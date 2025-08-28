@@ -138,8 +138,8 @@ var socksCmd = &cobra.Command{
 		// 创建自定义的 Dial 函数，为每个连接使用单独的账户
 		var connectionCount int64
 
-		// 创建账户池，确保至少有连接数+1个账户
-		accountPool := api.NewAccountPool(1, api.RegisterNewAccount, func() int {
+		// 创建账户池，确保至少有连接数+1个账户，最大20个账户
+		accountPool := api.NewAccountPool(1, 20, api.RegisterNewAccount, func() int {
 			return int(atomic.LoadInt64(&connectionCount))
 		})
 
