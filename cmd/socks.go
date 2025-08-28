@@ -2,10 +2,12 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net"
 	"net/netip"
 	"os"
+	"sync/atomic"
 	"time"
 
 	"github.com/Diniboy1123/usque/api"
@@ -26,43 +28,10 @@ var socksCmd = &cobra.Command{
 			return
 		}
 
+		// 解析命令行参数
 		sni, err := cmd.Flags().GetString("sni-address")
 		if err != nil {
 			cmd.Printf("Failed to get SNI address: %v\n", err)
-			return
-		}
-
-		privKey, err := config.AppConfig.GetEcPrivateKey()
-		if err != nil {
-			cmd.Printf("Failed to get private key: %v\n", err)
-			return
-		}
-		peerPubKey, err := config.AppConfig.GetEcEndpointPublicKey()
-		if err != nil {
-			cmd.Printf("Failed to get public key: %v\n", err)
-			return
-		}
-
-		cert, err := internal.GenerateCert(privKey, &privKey.PublicKey)
-		if err != nil {
-			cmd.Printf("Failed to generate cert: %v\n", err)
-			return
-		}
-
-		tlsConfig, err := api.PrepareTlsConfig(privKey, peerPubKey, cert, sni)
-		if err != nil {
-			cmd.Printf("Failed to prepare TLS config: %v\n", err)
-			return
-		}
-
-		keepalivePeriod, err := cmd.Flags().GetDuration("keepalive-period")
-		if err != nil {
-			cmd.Printf("Failed to get keepalive period: %v\n", err)
-			return
-		}
-		initialPacketSize, err := cmd.Flags().GetUint16("initial-packet-size")
-		if err != nil {
-			cmd.Printf("Failed to get initial packet size: %v\n", err)
 			return
 		}
 
@@ -84,19 +53,6 @@ var socksCmd = &cobra.Command{
 			return
 		}
 
-		var endpoint *net.UDPAddr
-		if ipv6, err := cmd.Flags().GetBool("ipv6"); err == nil && !ipv6 {
-			endpoint = &net.UDPAddr{
-				IP:   net.ParseIP(config.AppConfig.EndpointV4),
-				Port: connectPort,
-			}
-		} else {
-			endpoint = &net.UDPAddr{
-				IP:   net.ParseIP(config.AppConfig.EndpointV6),
-				Port: connectPort,
-			}
-		}
-
 		tunnelIPv4, err := cmd.Flags().GetBool("no-tunnel-ipv4")
 		if err != nil {
 			cmd.Printf("Failed to get no tunnel IPv4: %v\n", err)
@@ -107,24 +63,6 @@ var socksCmd = &cobra.Command{
 		if err != nil {
 			cmd.Printf("Failed to get no tunnel IPv6: %v\n", err)
 			return
-		}
-
-		var localAddresses []netip.Addr
-		if !tunnelIPv4 {
-			v4, err := netip.ParseAddr(config.AppConfig.IPv4)
-			if err != nil {
-				cmd.Printf("Failed to parse IPv4 address: %v\n", err)
-				return
-			}
-			localAddresses = append(localAddresses, v4)
-		}
-		if !tunnelIPv6 {
-			v6, err := netip.ParseAddr(config.AppConfig.IPv6)
-			if err != nil {
-				cmd.Printf("Failed to parse IPv6 address: %v\n", err)
-				return
-			}
-			localAddresses = append(localAddresses, v6)
 		}
 
 		dnsServers, err := cmd.Flags().GetStringArray("dns")
@@ -173,26 +111,42 @@ var socksCmd = &cobra.Command{
 			password = p
 		}
 
+		keepalivePeriod, err := cmd.Flags().GetDuration("keepalive-period")
+		if err != nil {
+			cmd.Printf("Failed to get keepalive period: %v\n", err)
+			return
+		}
+		initialPacketSize, err := cmd.Flags().GetUint16("initial-packet-size")
+		if err != nil {
+			cmd.Printf("Failed to get initial packet size: %v\n", err)
+			return
+		}
+
 		reconnectDelay, err := cmd.Flags().GetDuration("reconnect-delay")
 		if err != nil {
 			cmd.Printf("Failed to get reconnect delay: %v\n", err)
 			return
 		}
 
-		tunDev, tunNet, err := netstack.CreateNetTUN(localAddresses, dnsAddrs, mtu)
+		ipv6, err := cmd.Flags().GetBool("ipv6")
 		if err != nil {
-			cmd.Printf("Failed to create virtual TUN device: %v\n", err)
+			cmd.Printf("Failed to get ipv6 flag: %v\n", err)
 			return
 		}
-		defer tunDev.Close()
 
-		go api.MaintainTunnel(context.Background(), tlsConfig, keepalivePeriod, initialPacketSize, endpoint, api.NewNetstackAdapter(tunDev), mtu, reconnectDelay)
+		// 创建账户池
+		accountPool := api.NewAccountPool(2, api.RegisterNewAccount)
 
+		// 创建自定义的 Dial 函数，为每个连接使用单独的账户
+		var connectionCount int64
+
+		// 创建 SOCKS5 服务器
 		var resolver socks5.NameResolver
 		if localDNS {
 			resolver = internal.TunnelDNSResolver{TunNet: nil, DNSAddrs: dnsAddrs, Timeout: dnsTimeout}
 		} else {
-			resolver = internal.TunnelDNSResolver{TunNet: tunNet, DNSAddrs: dnsAddrs, Timeout: dnsTimeout}
+			// 对于动态代理，我们需要为每个连接创建 resolver
+			resolver = nil
 		}
 
 		var server *socks5.Server
@@ -200,7 +154,32 @@ var socksCmd = &cobra.Command{
 			server = socks5.NewServer(
 				socks5.WithLogger(socks5.NewLogger(log.New(os.Stdout, "socks5: ", log.LstdFlags))),
 				socks5.WithDial(func(ctx context.Context, network, addr string) (net.Conn, error) {
-					return tunNet.DialContext(ctx, network, addr)
+					count := atomic.AddInt64(&connectionCount, 1)
+					log.Printf("Handling connection #%d to %s", count, addr)
+
+					// 从账户池获取账户
+					account, err := accountPool.GetAccount()
+					if err != nil {
+						return nil, fmt.Errorf("failed to get account from pool: %v", err)
+					}
+					defer accountPool.ReleaseAccount(account)
+
+					// 使用账户配置创建隧道
+					return createTunnelConnection(
+						account.Config,
+						addr,
+						sni,
+						connectPort,
+						ipv6,
+						tunnelIPv4,
+						tunnelIPv6,
+						dnsAddrs,
+						mtu,
+						keepalivePeriod,
+						initialPacketSize,
+						reconnectDelay,
+						network,
+					)
 				}),
 				socks5.WithResolver(resolver),
 			)
@@ -208,7 +187,32 @@ var socksCmd = &cobra.Command{
 			server = socks5.NewServer(
 				socks5.WithLogger(socks5.NewLogger(log.New(os.Stdout, "socks5: ", log.LstdFlags))),
 				socks5.WithDial(func(ctx context.Context, network, addr string) (net.Conn, error) {
-					return tunNet.DialContext(ctx, network, addr)
+					count := atomic.AddInt64(&connectionCount, 1)
+					log.Printf("Handling connection #%d to %s", count, addr)
+
+					// 从账户池获取账户
+					account, err := accountPool.GetAccount()
+					if err != nil {
+						return nil, fmt.Errorf("failed to get account from pool: %v", err)
+					}
+					defer accountPool.ReleaseAccount(account)
+
+					// 使用账户配置创建隧道
+					return createTunnelConnection(
+						account.Config,
+						addr,
+						sni,
+						connectPort,
+						ipv6,
+						tunnelIPv4,
+						tunnelIPv6,
+						dnsAddrs,
+						mtu,
+						keepalivePeriod,
+						initialPacketSize,
+						reconnectDelay,
+						network,
+					)
 				}),
 				socks5.WithResolver(resolver),
 				socks5.WithAuthMethods(
@@ -223,12 +227,102 @@ var socksCmd = &cobra.Command{
 			)
 		}
 
-		log.Printf("SOCKS proxy listening on %s:%s", bindAddress, port)
+		log.Printf("Dynamic SOCKS proxy listening on %s:%s", bindAddress, port)
+		log.Printf("Each connection will use a separate account from the pool")
 		if err := server.ListenAndServe("tcp", net.JoinHostPort(bindAddress, port)); err != nil {
 			cmd.Printf("Failed to start SOCKS proxy: %v\n", err)
 			return
 		}
 	},
+}
+
+// createTunnelConnection 为指定地址创建隧道连接
+func createTunnelConnection(
+	cfg *config.Config,
+	addr string,
+	sni string,
+	connectPort int,
+	ipv6 bool,
+	tunnelIPv4 bool,
+	tunnelIPv6 bool,
+	dnsAddrs []netip.Addr,
+	mtu int,
+	keepalivePeriod time.Duration,
+	initialPacketSize uint16,
+	reconnectDelay time.Duration,
+	network string,
+) (net.Conn, error) {
+	// 获取私钥和公钥
+	privKey, err := cfg.GetEcPrivateKey()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get private key: %v", err)
+	}
+
+	peerPubKey, err := cfg.GetEcEndpointPublicKey()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get public key: %v", err)
+	}
+
+	// 生成证书
+	cert, err := internal.GenerateCert(privKey, &privKey.PublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate cert: %v", err)
+	}
+
+	// 准备 TLS 配置
+	tlsConfig, err := api.PrepareTlsConfig(privKey, peerPubKey, cert, sni)
+	if err != nil {
+		return nil, fmt.Errorf("failed to prepare TLS config: %v", err)
+	}
+
+	// 确定端点地址
+	var endpoint *net.UDPAddr
+	if !ipv6 {
+		endpoint = &net.UDPAddr{
+			IP:   net.ParseIP(cfg.EndpointV4),
+			Port: connectPort,
+		}
+	} else {
+		endpoint = &net.UDPAddr{
+			IP:   net.ParseIP(cfg.EndpointV6),
+			Port: connectPort,
+		}
+	}
+
+	// 设置本地地址
+	var localAddresses []netip.Addr
+	if !tunnelIPv4 {
+		v4, err := netip.ParseAddr(cfg.IPv4)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse IPv4 address: %v", err)
+		}
+		localAddresses = append(localAddresses, v4)
+	}
+	if !tunnelIPv6 {
+		v6, err := netip.ParseAddr(cfg.IPv6)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse IPv6 address: %v", err)
+		}
+		localAddresses = append(localAddresses, v6)
+	}
+
+	// 创建虚拟 TUN 设备
+	tunDev, tunNet, err := netstack.CreateNetTUN(localAddresses, dnsAddrs, mtu)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create virtual TUN device: %v", err)
+	}
+	defer tunDev.Close()
+
+	// 启动隧道维护 goroutine
+	go api.MaintainTunnel(context.Background(), tlsConfig, keepalivePeriod, initialPacketSize, endpoint, api.NewNetstackAdapter(tunDev), mtu, reconnectDelay)
+
+	// 连接到目标地址
+	conn, err := tunNet.DialContext(context.Background(), network, addr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to dial %s: %v", addr, err)
+	}
+
+	return conn, nil
 }
 
 func init() {
@@ -248,5 +342,4 @@ func init() {
 	socksCmd.Flags().Uint16P("initial-packet-size", "i", 1242, "Initial packet size for MASQUE connection")
 	socksCmd.Flags().DurationP("reconnect-delay", "r", 1*time.Second, "Delay between reconnect attempts")
 	socksCmd.Flags().BoolP("local-dns", "l", false, "Don't use the tunnel for DNS queries")
-	rootCmd.AddCommand(socksCmd)
 }

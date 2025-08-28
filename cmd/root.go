@@ -20,7 +20,7 @@ var rootCmd = &cobra.Command{
 		if configPath != "" {
 			if err := config.LoadConfig(configPath); err != nil {
 				log.Printf("Config file not found: %v", err)
-				log.Printf("You may only use the register command to generate one.")
+				log.Printf("You may only use the register and enroll commands to generate one.")
 			}
 		}
 	},
@@ -32,4 +32,8 @@ func Execute() error {
 
 func init() {
 	rootCmd.PersistentFlags().StringP("config", "c", "config.json", "config file (default is config.json)")
+	rootCmd.AddCommand(registerCmd)
+	rootCmd.AddCommand(enrollCmd)
+	rootCmd.AddCommand(socksCmd)
+	rootCmd.AddCommand(versionCmd)
 }

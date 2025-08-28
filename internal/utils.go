@@ -54,25 +54,34 @@ func GenerateRandomWgPubkey() (string, error) {
 	return base64.StdEncoding.EncodeToString(publicKey), nil
 }
 
-// TimeAsCfString formats a given time.Time into a Cloudflare-compatible string format.
-//
-// The format follows the standard: "YYYY-MM-DDTHH:MM:SS.sss-07:00".
+// TimeAsCfString formats a time.Time object into a string representation compatible with Cloudflare's API format.
 //
 // Parameters:
-//   - t: time.Time to format.
+//   - t: time.Time - The time to format.
 //
 // Returns:
 //   - string: The formatted time string.
 func TimeAsCfString(t time.Time) string {
-	return t.Format("2006-01-02T15:04:05.000-07:00")
+	return t.UTC().Format("2006-01-02T15:04:05.000Z")
 }
 
-// GenerateEcKeyPair generates a new ECDSA key pair using the P-256 curve.
+// EncodeBase64 encodes bytes to Base64 string
+//
+// Parameters:
+//   - data: []byte - The data to encode.
 //
 // Returns:
-//   - []byte: The marshalled private key in ASN.1 DER format.
-//   - []byte: The marshalled public key in PKIX format.
-//   - error:  An error if key generation or marshalling fails.
+//   - string: The Base64 encoded string.
+func EncodeBase64(data []byte) string {
+	return base64.StdEncoding.EncodeToString(data)
+}
+
+// GenerateEcKeyPair generates an ECDSA key pair on the NIST P-256 curve.
+//
+// Returns:
+//   - []byte: The private key in ASN.1 DER format.
+//   - []byte: The public key in ASN.1 DER format.
+//   - error: An error if key generation fails.
 func GenerateEcKeyPair() ([]byte, []byte, error) {
 	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {

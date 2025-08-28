@@ -2,7 +2,7 @@
 
 🥚➡️🍏🍎
 
-Usque is an open-source reimplementation of the Cloudflare WARP client's MASQUE mode. It leverages the [Connnect-IP (RFC 9484)](https://datatracker.ietf.org/doc/rfc9484/) protocol and comes with many operation modes including a native tunnel (currently Linux only), a SOCKS5 proxy, and a HTTP proxy.
+Usque is an open-source reimplementation of the Cloudflare WARP client's MASQUE mode. It leverages the [Connnect-IP (RFC 9484)](https://datatracker.ietf.org/doc/rfc9484/) protocol and comes with many operation modes including a SOCKS5 proxy.
 
 ## Table of Contents
 
@@ -15,14 +15,7 @@ Usque is an open-source reimplementation of the Cloudflare WARP client's MASQUE 
   - [Usage](#usage)
     - [Registration](#registration)
     - [Enrolling](#enrolling)
-    - [Native Tunnel Mode (for Advanced Users, Linux and Windows only!)](#native-tunnel-mode-for-advanced-users-linux-and-windows-only)
-      - [On Linux](#on-linux)
-      - [On Windows](#on-windows)
-      - [Routes on Linux](#routes-on-linux)
-      - [Routes on Windows](#routes-on-windows)
     - [SOCKS5 Proxy Mode (easy, cross-platform)](#socks5-proxy-mode-easy-cross-platform)
-    - [HTTP Proxy Mode (easy, cross-platform)](#http-proxy-mode-easy-cross-platform)
-    - [Port Forwarding Mode (for Advanced Users, cross-platform)](#port-forwarding-mode-for-advanced-users-cross-platform)
     - [Configuration](#configuration)
       - [Fields](#fields)
   - [ZeroTrust support](#zerotrust-support)
@@ -94,9 +87,6 @@ Available Commands:
   completion  Generate the autocompletion script for the specified shell
   enroll      Enrolls a MASQUE private key and switches mode
   help        Help about any command
-  http-proxy  Expose Warp as an HTTP proxy with CONNECT support
-  nativetun   Expose Warp as a native TUN device
-  portfw      Forward ports through a MASQUE tunnel
   register    Register a new client and enroll a device key
   socks       Expose Warp as a SOCKS5 proxy
 
@@ -143,103 +133,6 @@ While the registration command also handles device enrollment, in some cases, yo
 $ ./usque enroll
 ```
 
-### Native Tunnel Mode (for Advanced Users, Linux and Windows only!)
-
-The native tunnel is probably the most **efficient** mode of operation *(as of now)*. 
-
-#### On Linux
-
-It **requires the `TUN` device** to be available on the system. This means your kernel must support loading the `tun.ko` module. **`iproute2` is also a requirement**. While it is still userspace, traffic is directly injected into the kernel's network stack, therefore you will see a real network interface and you will be able to tunnel any IP (Layer 3) traffic that WARP supports. Since it creates a real network interface and also attempts to set IP addresses, **it will most likely require root privileges**.
-
-#### On Windows
-
-It requires the [wintun.dll](https://www.wintun.net/) file to be present in the same directory as the `usque.exe` binary. Then it will take care of bringing up the interface and setting the IP addresses. Normally this also requires administrative privileges.
-
-To bring up a native tunnel, execute:
-
-```shell
-$ sudo ./usque nativetun
-```
-
-Unless otherwise specified, you should see a `tun0` (or `tun1`, `tun2`, etc.) interface appear on Linux. On Windows, the interface is typically named `usque`. If you didn't disable IPv4 and IPv6 inside the tunnel using cli flags (on Linux), you should also see the IPv4 and IPv6 address pre-assigned to this interface. This should be enough for applications that can route traffic through a specific network interface to function. For example `ping`:
-
-```shell
-$ ping -I tun0 1.1
-```
-
-Or `curl`:
-
-```shell
-$ curl --interface tun0 https://cloudflare.com/cdn-cgi/trace
-```
-
-Should just work. However **the tool doesn't set any routes**. If you need that, you have to do that manually. For example, to route all traffic to the tunnel, you need to make sure that the address used for tunnel communication is routed to your regular network interface. For that, open the `config.json` and check the endpoint address. If you plan to connect to the Cloudflare endpoint using IPv4, you will most likely see this:
-
-```json
-"endpoint_v4": "162.159.198.1"
-```
-
-Remember that for the next steps.
-
-#### Routes on Linux
-
-Assuming your regular network interface is `eth0` and your gateway address is `192.168.1.1`, you can add a route like this:
-
-```shell
-$ sudo ip route add 162.159.198.1/32 via 192.168.1.1 dev eth0
-```
-
-After that, you can add a default route to the `tun0` interface for both IPv4 and IPv6:
-
-```shell
-$ sudo ip route add default dev tun0 && sudo ip -6 route add default dev tun0
-```
-
-#### Routes on Windows
-
-First, determine the interface index for your regular network adapter by running:
-
-```cmd
-route print
-```
-
-Look under the **Interface List** for the correct index number.
-
-Before adding default routes, determine the gateway for your tunnel interface by running:
-
-```cmd
-ipconfig
-```
-
-Look for the adapter named `usque` (or whatever name you have for your tunnel interface) and note its gateway address.
-
-Assuming:
-
-* Tunnel endpoint: `162.159.198.1`
-* Gateway: `192.168.1.1`
-* Interface index: `12`
-* Tunnel interface: `usque` (replace with the actual name or index of your tunnel interface)
-
-Run the following commands in an **elevated Command Prompt** (Run as Administrator):
-
-```cmd
-route add 162.159.198.1 mask 255.255.255.255 192.168.1.1 metric 1 if 12
-```
-
-Then add default routes to route all traffic through the tunnel:
-
-```cmd
-route add 0.0.0.0 mask 0.0.0.0 [TUNNEL_GATEWAY] metric 1 if [TUN_INTERFACE_INDEX]
-route add ::/0 [TUNNEL_GATEWAY] metric 1 if [TUN_INTERFACE_INDEX]
-```
-
-> [!NOTE]
-> Replace `[TUNNEL_GATEWAY]` and `[TUN_INTERFACE_INDEX]` with the actual values for your tunnel adapter. You can get these by checking `ipconfig` and `route print`.
-
-> [!CAUTION]
-> Always be careful with default routes, especially if you are running this on a headless machine. It is very easy to close yourself out of your current session. I suggest [network namespaces](https://man7.org/linux/man-pages/man7/network_namespaces.7.html) on Linux as a safer playground for experiments or a spare VM with physical access or serial console.
-> On Windows, you can set specific routes first such as `8.8.8.8/32` to ensure the tunnel works before adding a default route.
-
 ### SOCKS5 Proxy Mode (easy, cross-platform)
 
 If you just want to expose the tunnel as a quickly deployable proxy and your client supports SOCKS5, this mode is for you. It **supports both IPv4 and IPv6**. **TCP and UDP** even! It is also **cross-platform** and doesn't require any special kernel modules or root privileges. However it emulates an entire user-space network stack, so it can be resource hungry.
@@ -272,68 +165,6 @@ curl -x socks5://myuser:mypass@localhost:8080 https://cloudflare.com/cdn-cgi/tra
 
 > [!NOTE]
 > For now only one `user:pass` is supported.
-
-### HTTP Proxy Mode (easy, cross-platform)
-
-Another easy to "*get up and running*" mode of operation is the HTTP proxy mode. **Almost all clients support HTTP proxies**. Regular HTTP unencrypted traffic sent to this proxy will simply be forwarded to the WARP network. For HTTPS and any other **TCP traffic**, the proxy exposes a HTTP `CONNECT` method. This mode is **cross-platform** and doesn't require any special kernel modules or root privileges. However it emulates an entire user-space network stack, so it can be resource hungry.
-
-To start a HTTP proxy, you can run:
-
-```shell
-$ ./usque http-proxy
-```
-
-By default this will launch a HTTP proxy on `0.0.0.0:8000` **with no authentication**. You can choose to bind to a specific address and port by specifying `-b` and `-p` respectively. You can also enable authentication by specifying `-u` and `-w` for username and password. For example:
-
-```shell
-$ ./usque http-proxy -b 127.0.0.1 -p 8080 -u myuser -w mypass
-```
-
-Will start a HTTP proxy accessible only on `127.0.0.1:8080` with username `myuser` and password `mypass`.
-
-Test the proxy with `curl`:
-
-```shell
-curl -x http://myuser:mypass@localhost:8080 https://cloudflare.com/cdn-cgi/trace
-```
-
-> [!NOTE]
-> Since the proxy emulates its own networking stack, it's generally safe to say that users won't be able to access internal IPs and services the host has access to using the proxy. However the internal WARP network is available for them unfiltered. If you have ZeroTrust and Gateway on, users of your proxy may be able to reach each other as no manual filtering is applied. **Inside the tunnel they will be able to connect to any TCP service.**
-
-> [!CAUTION]
-> Local HTTP **traffic is not encrypted** since HTTP does not support encryption, and HTTPS isn't implemented. It should be trivial to add, but I didn't need it yet. You probably shouldn't transport statewide secrets from one device to another on a public WiFi that has `usque` running.
-
-> [!NOTE]
-> For now only one `user:pass` is supported.
-
-### Port Forwarding Mode (for Advanced Users, cross-platform)
-
-While most other modes expose the tunnel in some way or another, this mode is intended for more advanced use-cases. Think of it a bit like SSH forwarding. It allows you to either forward a specific port from the host to the WARP network or from the WARP network to the host.
-
-*Why would you do that, you may ask?* For regular WARP, this feature is pretty useless. In fact the tool's `registration` command cannot even set this up properly. However with some manual configuration and assuming you have a ZeroTrust network, you can configure WARP to WARP device communication. Each device will have a unique internal IPv4 and IPv6 address and they can reach each other that way. This is not how it works out of the box however, so [follow the offical guide](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/private-net/warp-to-warp/) to set it up. Once you have it working, you can use this feature to forward ports to and from the WARP network.
-
-> [!TIP]
-> It is very important for this mode to function properly to have up to date IP addresses in the config. Running the [enrollment](#enrolling) process before bringing up the forwarding should set the correct IPs.
-
-This mode is **cross-platform** and doesn't require any special kernel modules or root privileges. However it emulates an entire user-space network stack, so it can be resource hungry.
-
-As for the setup. Let's say you have this in the config:
-
-```json
-"ipv4": "100.96.0.3"
-```
-
-Which means that your device's internal IPv4 address is `100.96.0.3`. You are running a webserver on the host machine on port `8080`. Then there is another device with internal IPv4 address `100.96.0.2` that also exposes a webserver on port `8081`. You would like to forward the host's port `8080` to the WARP network and the WARP network's port `8081` to the host. To set this up, you can run:
-
-```shell
-$ ./usque portfw -R 100.96.0.3:8080:localhost:8080 -L localhost:8081:100.96.0.2:8081
-```
-
-> [!TIP]
-> The syntax isn't exactly like the one from SSH. I suggest that you specify the syntax as seen in the example preferably with IP addresses and not hosts.
-
-> [!TIP]
-> Any number of ports are supported. You can chain many ports together if you specify the flag and the corresponding argument one after another.
 
 ### Configuration
 
@@ -507,10 +338,8 @@ This tool wouldn't exist without the following incredible projects. Please go an
 - [JADX-GUI](https://github.com/skylot/jadx) - Great stuff for dealing with Android APKs. Helped a lot with understanding the official client.
 - [masque-go](https://github.com/quic-go/masque-go) - While I didn't end up using it, as this is for `connect-udp` like `RFC 9298` compliant MASQUE servers, it was a great starting point while I was researching the topic.
 - [mitmproxy](https://mitmproxy.org/) - Very useful for intercepting API calls made by the official client.
-- [netlink](github.com/vishvananda/netlink) - A great library for interacting with the Linux network stack using `iproute2`. Used for the native tunnel mode on Linux.
 - [quic-go](https://github.com/quic-go/quic-go) - Powerful QUIC library for Go, used for many things from establishing the connection to maintaining it.
 - [uritemplate](github.com/yosida95/uritemplate) - A great library for parsing URI templates. Used as a utility to pass the correct endpoint URI to `connect-ip-go`.
-- [water](https://github.com/songgao/water) - A TUN/TAP library for Go. Used for the native tunnel mode. Taught me everything I know about TUN/TAP devices.
 - [wireguard-go](golang.zx2c4.com/wireguard) - A WireGuard library for Go. Used very widely by the project too for rootless virtual tun networks, because its `netstack` implementation is very easy to use.
 - [wireshark](https://www.wireshark.org/) - I used Wireshark to debug both the official client and this tool during initial development. A real swiss army knife for network debugging.
 

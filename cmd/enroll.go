@@ -132,9 +132,3 @@ var enrollCmd = &cobra.Command{
 		log.Printf("Config saved to %s", configPath)
 	},
 }
-
-func init() {
-	enrollCmd.Flags().StringP("name", "n", "", "Rename device a given name")
-	enrollCmd.Flags().BoolP("regen-key", "r", false, "Regenerate the key pair")
-	rootCmd.AddCommand(enrollCmd)
-}

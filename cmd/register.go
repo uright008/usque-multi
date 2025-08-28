@@ -117,5 +117,4 @@ func init() {
 	registerCmd.Flags().StringP("name", "n", "", "device name")
 	registerCmd.Flags().String("jwt", "", "team token")
 	registerCmd.Flags().BoolP("accept-tos", "a", false, "accept Cloudflare TOS (not interactive setup)")
-	rootCmd.AddCommand(registerCmd)
 }
