@@ -163,9 +163,8 @@ var socksCmd = &cobra.Command{
 					// 从账户池获取账户
 					account, err := accountPool.GetAccount()
 					if err != nil {
-						// 已经增加了计数器，需要减少
 						atomic.AddInt64(&connectionCount, -1)
-						// 返回错误时不返回nil，而是返回 socks5.ErrConnDial
+						log.Printf("Failed to get account from pool: %v", err)
 						return nil, fmt.Errorf("failed to get account from pool: %v", err)
 					}
 
@@ -186,12 +185,32 @@ var socksCmd = &cobra.Command{
 						network,
 					)
 					if err != nil {
-						// 已经增加了计数器，需要减少
 						atomic.AddInt64(&connectionCount, -1)
-						// 释放账户
 						accountPool.ReleaseAccount(account)
-						// 返回错误时不返回nil，而是返回 socks5.ErrConnDial
-						return nil, fmt.Errorf("failed to create tunnel connection: %v", err)
+						log.Printf("Failed to create tunnel connection: %v", err)
+						return nil, err
+					}
+
+					// 确保conn不为nil
+					if conn == nil {
+						atomic.AddInt64(&connectionCount, -1)
+						accountPool.ReleaseAccount(account)
+						if cleanup != nil {
+							cleanup()
+						}
+						log.Printf("Tunnel connection is nil")
+						return nil, fmt.Errorf("failed to create tunnel connection")
+					}
+
+					// 检查conn是否实现了必要的方法
+					if conn.RemoteAddr() == nil {
+						atomic.AddInt64(&connectionCount, -1)
+						accountPool.ReleaseAccount(account)
+						if cleanup != nil {
+							cleanup()
+						}
+						log.Printf("Tunnel connection has nil RemoteAddr")
+						return nil, fmt.Errorf("tunnel connection has nil RemoteAddr")
 					}
 
 					// 包装连接以在关闭时释放账户和减少计数
@@ -202,6 +221,8 @@ var socksCmd = &cobra.Command{
 						count:       &connectionCount,
 						cleanup:     cleanup,
 					}
+
+					log.Printf("Successfully created connection #%d to %s", count, addr)
 
 					return wrappedConn, nil
 				}),
@@ -217,9 +238,8 @@ var socksCmd = &cobra.Command{
 					// 从账户池获取账户
 					account, err := accountPool.GetAccount()
 					if err != nil {
-						// 已经增加了计数器，需要减少
 						atomic.AddInt64(&connectionCount, -1)
-						// 返回错误时不返回nil，而是返回 socks5.ErrConnDial
+						log.Printf("Failed to get account from pool: %v", err)
 						return nil, fmt.Errorf("failed to get account from pool: %v", err)
 					}
 
@@ -240,12 +260,32 @@ var socksCmd = &cobra.Command{
 						network,
 					)
 					if err != nil {
-						// 已经增加了计数器，需要减少
 						atomic.AddInt64(&connectionCount, -1)
-						// 释放账户
 						accountPool.ReleaseAccount(account)
-						// 返回错误时不返回nil，而是返回 socks5.ErrConnDial
-						return nil, fmt.Errorf("failed to create tunnel connection: %v", err)
+						log.Printf("Failed to create tunnel connection: %v", err)
+						return nil, err
+					}
+
+					// 确保conn不为nil
+					if conn == nil {
+						atomic.AddInt64(&connectionCount, -1)
+						accountPool.ReleaseAccount(account)
+						if cleanup != nil {
+							cleanup()
+						}
+						log.Printf("Tunnel connection is nil")
+						return nil, fmt.Errorf("failed to create tunnel connection")
+					}
+
+					// 检查conn是否实现了必要的方法
+					if conn.RemoteAddr() == nil {
+						atomic.AddInt64(&connectionCount, -1)
+						accountPool.ReleaseAccount(account)
+						if cleanup != nil {
+							cleanup()
+						}
+						log.Printf("Tunnel connection has nil RemoteAddr")
+						return nil, fmt.Errorf("tunnel connection has nil RemoteAddr")
 					}
 
 					// 包装连接以在关闭时释放账户和减少计数
@@ -256,6 +296,8 @@ var socksCmd = &cobra.Command{
 						count:       &connectionCount,
 						cleanup:     cleanup,
 					}
+
+					log.Printf("Successfully created connection #%d to %s", count, addr)
 
 					return wrappedConn, nil
 				}),
@@ -316,6 +358,62 @@ func (atc *accountTrackingConn) Close() error {
 		}
 	})
 	return err
+}
+
+// Read 实现net.Conn接口的Read方法
+func (atc *accountTrackingConn) Read(b []byte) (n int, err error) {
+	if atc.Conn == nil {
+		return 0, fmt.Errorf("connection is nil")
+	}
+	return atc.Conn.Read(b)
+}
+
+// Write 实现net.Conn接口的Write方法
+func (atc *accountTrackingConn) Write(b []byte) (n int, err error) {
+	if atc.Conn == nil {
+		return 0, fmt.Errorf("connection is nil")
+	}
+	return atc.Conn.Write(b)
+}
+
+// LocalAddr 实现net.Conn接口的LocalAddr方法
+func (atc *accountTrackingConn) LocalAddr() net.Addr {
+	if atc.Conn == nil {
+		return nil
+	}
+	return atc.Conn.LocalAddr()
+}
+
+// RemoteAddr 实现net.Conn接口的RemoteAddr方法
+func (atc *accountTrackingConn) RemoteAddr() net.Addr {
+	if atc.Conn == nil {
+		return nil
+	}
+	return atc.Conn.RemoteAddr()
+}
+
+// SetDeadline 实现net.Conn接口的SetDeadline方法
+func (atc *accountTrackingConn) SetDeadline(t time.Time) error {
+	if atc.Conn == nil {
+		return fmt.Errorf("connection is nil")
+	}
+	return atc.Conn.SetDeadline(t)
+}
+
+// SetReadDeadline 实现net.Conn接口的SetReadDeadline方法
+func (atc *accountTrackingConn) SetReadDeadline(t time.Time) error {
+	if atc.Conn == nil {
+		return fmt.Errorf("connection is nil")
+	}
+	return atc.Conn.SetReadDeadline(t)
+}
+
+// SetWriteDeadline 实现net.Conn接口的SetWriteDeadline方法
+func (atc *accountTrackingConn) SetWriteDeadline(t time.Time) error {
+	if atc.Conn == nil {
+		return fmt.Errorf("connection is nil")
+	}
+	return atc.Conn.SetWriteDeadline(t)
 }
 
 // createTunnelConnection 为指定地址创建隧道连接
@@ -404,6 +502,13 @@ func createTunnelConnection(
 		cancel() // 取消维护goroutine
 		tunDev.Close()
 		return nil, nil, fmt.Errorf("failed to dial %s: %v", addr, err)
+	}
+
+	// 确保连接不为nil
+	if conn == nil {
+		cancel()
+		tunDev.Close()
+		return nil, nil, fmt.Errorf("dial succeeded but returned nil connection")
 	}
 
 	// 返回清理函数
