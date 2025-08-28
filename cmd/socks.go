@@ -163,7 +163,9 @@ var socksCmd = &cobra.Command{
 					// 从账户池获取账户
 					account, err := accountPool.GetAccount()
 					if err != nil {
+						// 已经增加了计数器，需要减少
 						atomic.AddInt64(&connectionCount, -1)
+						// 返回错误时不返回nil，而是返回 socks5.ErrConnDial
 						return nil, fmt.Errorf("failed to get account from pool: %v", err)
 					}
 
@@ -184,9 +186,12 @@ var socksCmd = &cobra.Command{
 						network,
 					)
 					if err != nil {
+						// 已经增加了计数器，需要减少
 						atomic.AddInt64(&connectionCount, -1)
+						// 释放账户
 						accountPool.ReleaseAccount(account)
-						return nil, err
+						// 返回错误时不返回nil，而是返回 socks5.ErrConnDial
+						return nil, fmt.Errorf("failed to create tunnel connection: %v", err)
 					}
 
 					// 包装连接以在关闭时释放账户和减少计数
@@ -212,7 +217,9 @@ var socksCmd = &cobra.Command{
 					// 从账户池获取账户
 					account, err := accountPool.GetAccount()
 					if err != nil {
+						// 已经增加了计数器，需要减少
 						atomic.AddInt64(&connectionCount, -1)
+						// 返回错误时不返回nil，而是返回 socks5.ErrConnDial
 						return nil, fmt.Errorf("failed to get account from pool: %v", err)
 					}
 
@@ -233,9 +240,12 @@ var socksCmd = &cobra.Command{
 						network,
 					)
 					if err != nil {
+						// 已经增加了计数器，需要减少
 						atomic.AddInt64(&connectionCount, -1)
+						// 释放账户
 						accountPool.ReleaseAccount(account)
-						return nil, err
+						// 返回错误时不返回nil，而是返回 socks5.ErrConnDial
+						return nil, fmt.Errorf("failed to create tunnel connection: %v", err)
 					}
 
 					// 包装连接以在关闭时释放账户和减少计数
@@ -285,7 +295,7 @@ type accountTrackingConn struct {
 func (atc *accountTrackingConn) Close() error {
 	var err error
 	atc.once.Do(func() {
-		// 确保连接关闭
+		// 关闭实际连接
 		if atc.Conn != nil {
 			err = atc.Conn.Close()
 		}
@@ -399,7 +409,9 @@ func createTunnelConnection(
 	// 返回清理函数
 	cleanup := func() {
 		cancel() // 取消维护goroutine
-		conn.Close()
+		if conn != nil {
+			conn.Close()
+		}
 		tunDev.Close()
 	}
 
