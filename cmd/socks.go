@@ -143,6 +143,22 @@ var socksCmd = &cobra.Command{
 			return int(atomic.LoadInt64(&connectionCount))
 		})
 
+		// 预先注册一个账户
+		log.Printf("Pre-registering initial account...")
+		initialAccount, err := accountPool.GetAccount()
+		if err != nil {
+			cmd.Printf("Failed to pre-register initial account: %v\n", err)
+			return
+		}
+		log.Printf("Successfully pre-registered initial account")
+
+		// 确保初始账户在程序运行期间保持活跃
+		defer func() {
+			// 程序退出时释放初始账户
+			accountPool.ReleaseAccount(initialAccount)
+			log.Printf("Released initial account")
+		}()
+
 		// 创建 SOCKS5 服务器
 		var resolver socks5.NameResolver
 		if localDNS {

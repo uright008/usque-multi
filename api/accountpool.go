@@ -14,10 +14,13 @@ import (
 
 // AccountPool 管理账户池，确保始终有足够的账户供SOCKS连接使用
 type AccountPool struct {
-	accounts     []*Account
-	mu           sync.Mutex
-	minExtra     int
-	registerFunc func() (*config.Config, error)
+	accounts        []*Account
+	preRegistered   []*Account // 预注册账户
+	totalRegistered int        // 已注册账户总数（包括预注册）
+	mu              sync.Mutex
+	minExtra        int
+	maxTotal        int // 最大账户数限制
+	registerFunc    func() (*config.Config, error)
 }
 
 // Account 表示池中的单个账户
@@ -40,11 +43,25 @@ type TlsConfigWrapper struct {
 }
 
 // NewAccountPool 创建一个新的账户池
-func NewAccountPool(minExtra int, registerFunc func() (*config.Config, error), activeConnections func() int) *AccountPool {
+func NewAccountPool(minExtra int, maxTotal int, registerFunc func() (*config.Config, error), activeConnections func() int) *AccountPool {
 	pool := &AccountPool{
-		accounts:     make([]*Account, 0),
-		minExtra:     minExtra,
-		registerFunc: registerFunc,
+		accounts:      make([]*Account, 0),
+		preRegistered: make([]*Account, 0),
+		minExtra:      minExtra,
+		maxTotal:      maxTotal,
+		registerFunc:  registerFunc,
+	}
+
+	// 初始预注册一些账户
+	initialPreRegister := 5
+	for i := 0; i < initialPreRegister; i++ {
+		if config, err := registerFunc(); err == nil {
+			pool.preRegistered = append(pool.preRegistered, &Account{
+				Config:   config,
+				InUse:    false,
+				LastUsed: time.Now(),
+			})
+		}
 	}
 
 	// 启动后台 goroutine 来维护账户池
@@ -58,7 +75,7 @@ func (ap *AccountPool) GetAccount() (*Account, error) {
 	ap.mu.Lock()
 	defer ap.mu.Unlock()
 
-	// 查找一个未使用的账户
+	// 首先尝试从主账户池获取未使用的账户
 	for _, account := range ap.accounts {
 		if !account.InUse {
 			account.InUse = true
@@ -67,21 +84,37 @@ func (ap *AccountPool) GetAccount() (*Account, error) {
 		}
 	}
 
-	// 如果没有可用账户，注册一个新账户
-	log.Printf("No available accounts, registering a new one...")
-	newConfig, err := ap.registerFunc()
-	if err != nil {
-		return nil, fmt.Errorf("failed to register new account: %v", err)
+	// 如果主账户池为空，尝试从预注册账户中获取
+	if len(ap.preRegistered) > 0 {
+		account := ap.preRegistered[len(ap.preRegistered)-1]
+		ap.accounts = append(ap.accounts, account)
+		ap.preRegistered = ap.preRegistered[:len(ap.preRegistered)-1]
+		account.InUse = true
+		account.LastUsed = time.Now()
+		log.Printf("Moved account from pre-registered to active pool")
+		return account, nil
 	}
 
-	account := &Account{
-		Config:   newConfig,
-		InUse:    true,
-		LastUsed: time.Now(),
+	// 如果没有预注册账户且主账户池已满，检查是否可以注册新账户
+	if ap.totalRegistered < ap.maxTotal {
+		log.Printf("No pre-registered accounts available, registering a new one...")
+		newConfig, err := ap.registerFunc()
+		if err != nil {
+			return nil, fmt.Errorf("failed to register new account: %v", err)
+		}
+
+		account := &Account{
+			Config:   newConfig,
+			InUse:    true,
+			LastUsed: time.Now(),
+		}
+
+		ap.accounts = append(ap.accounts, account)
+		ap.totalRegistered++
+		return account, nil
 	}
 
-	ap.accounts = append(ap.accounts, account)
-	return account, nil
+	return nil, fmt.Errorf("no available accounts and maximum account limit reached")
 }
 
 // ReleaseAccount 释放账户，使其可再次使用
@@ -138,19 +171,20 @@ func (ap *AccountPool) checkAndRefill(activeConnections func() int) {
 	// 但为了简单起见，我们不实现这个功能
 }
 
-// GetAccountCount 返回池中账户总数和正在使用的账户数
-func (ap *AccountPool) GetAccountCount() (total, inUse int) {
+// GetAccountCount 返回池中账户总数、正在使用的账户数、预注册账户数
+func (ap *AccountPool) GetAccountCount() (total, inUse, preRegistered int) {
 	ap.mu.Lock()
 	defer ap.mu.Unlock()
 
 	total = len(ap.accounts)
+	preRegistered = len(ap.preRegistered)
 	for _, account := range ap.accounts {
 		if account.InUse {
 			inUse++
 		}
 	}
 
-	return total, inUse
+	return total, inUse, preRegistered
 }
 
 // GetActiveConnections 返回当前活跃连接数
